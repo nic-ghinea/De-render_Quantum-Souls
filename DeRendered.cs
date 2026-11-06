@@ -17,7 +17,7 @@
 // - Volumetric inner luminescence + live QPU coherence sparkle.
 // - Dynamic ground-projected quantum light pool.
 // - Always-on micro-HUD (within 7m) showing hidden developer NPC data.
-// - Universal Toggle: F9
+// - Universal Toggle: F10
 // ============================================================================
 
 using System;
@@ -45,7 +45,7 @@ namespace DeRenderMod
 
         public ModConfig()
         {
-            ToggleKey = Keys.F9;
+            ToggleKey = Keys.F10;
             ScanRadius = 70.0f;
             MaxTargets = 28;
             PhosphorGreen = Color.FromArgb(255, 50, 255, 120);
@@ -63,7 +63,7 @@ namespace DeRenderMod
                         "; All quantum operations run directly from the verified 224-job Atlas bank (DeRendered.baked.txt)\r\n" +
                         "; Zero background network calls, zero latency, 60+ FPS.\r\n\r\n" +
                         "[Settings]\r\n" +
-                        "ToggleKey=F9\r\n" +
+                        "ToggleKey=F10\r\n" +
                         "ScanRadius=70.0\r\n" +
                         "MaxTargets=28\r\n" +
                         "PhosphorGreenR=50\r\n" +
@@ -72,7 +72,7 @@ namespace DeRenderMod
                 }
 
                 ScriptSettings settings = ScriptSettings.Load(iniPath);
-                string keyStr = settings.GetValue("Settings", "ToggleKey", "F9");
+                string keyStr = settings.GetValue("Settings", "ToggleKey", "F10");
                 Keys pk;
                 if (Enum.TryParse(keyStr, true, out pk)) config.ToggleKey = pk;
 
@@ -163,6 +163,9 @@ namespace DeRenderMod
         public string Archetype;
         public string InternalModelName;
         public string RelationshipFaction;
+        public string ModelCode;
+        public string OutfitCode;
+        public string HeightMetric;
         public string VoiceTag;
         public int CombatAccuracy;
         public string CombatPsychology;
@@ -644,6 +647,10 @@ namespace DeRenderMod
                     _eventCount.Clear();
                     _assignedTasks.Clear();
                     _lastCuriousRefresh.Clear();
+                    _pedSpectrumCache.Clear();
+                    _pedPaletteCache.Clear();
+                    _pedOutfitCodeCache.Clear();
+                    _pedHeightCache.Clear();
                 }
             }
         }
@@ -1082,7 +1089,10 @@ namespace DeRenderMod
             float anchorY = outScreenY.GetResult<float>();
 
             string activeTask = DeriveActiveTask(ped);
-            string relToPlayer = DeriveRelationshipToPlayer(ped, player);
+            float speedMs = ped.Velocity.Length();
+            int restingBpm = 62 + Math.Abs(target.DigitalHash % 24);
+            int bpm = Math.Min(195, (int)(restingBpm + (speedMs * 13.5f) + (ped.Sweat * 0.45f) + (ped.IsFleeing ? 35 : (ped.IsInCombat ? 45 : 0))));
+            int sweatPct = Math.Max(0, Math.Min(100, (int)Math.Round(ped.Sweat)));
 
             string jobInfo = target.QuantumSpectrum != null
                 ? $"qpixl-v1 [{target.QuantumSpectrum.JobId.Substring(0, 8)}] ({target.QuantumSpectrum.Backend})"
@@ -1090,25 +1100,25 @@ namespace DeRenderMod
 
             // Updated ordering per user request:
             // 1. Name
-            // 2. Category
-            // 3. Family
+            // 2. Model
+            // 3. Outfit Code
             // 4. Voice_code
             // 5. Active task
-            // 6. Vitals
+            // 6. Vitals (HP, Armor, BPM, Sweat)
             // 7. Wallet
-            // 8. Relationship to Player
+            // 8. Height
             // 9. Quantum Personality
             // 10. Atlas Job Id
             string[] labels =
             {
                 "Name",
-                "Category",
-                "Family",
+                "Model",
+                "Outfit Code",
                 "Voice_code",
                 "Active task",
                 "Vitals",
                 "Wallet",
-                "Rel to Player",
+                "Height",
                 "Quantum Personality",
                 "Atlas Job Id"
             };
@@ -1116,13 +1126,13 @@ namespace DeRenderMod
             string[] values =
             {
                 target.InternalModelName,
-                DerivePedClassification(ped, target.InternalModelName),
-                target.RelationshipFaction,
+                target.ModelCode,
+                target.OutfitCode,
                 target.VoiceTag,
                 activeTask,
-                $"{target.Health} HP  /  ARMOR {target.Armor}",
+                $"{target.Health} HP / ARM {target.Armor} / {bpm} BPM / SWT {sweatPct}%",
                 $"${target.WalletCash}",
-                relToPlayer,
+                target.HeightMetric,
                 DerivePersonality(target.QuantumSpectrum) + " [qpixl]",
                 jobInfo
             };
@@ -1132,7 +1142,7 @@ namespace DeRenderMod
             float lineH = 0.0195f * proximity;
             float padX = 0.008f * proximity;
             float headerH = lineH * 1.5f;
-            float panelW = 0.235f * proximity;
+            float panelW = 0.255f * proximity;
             float panelH = headerH + (lineH * labels.Length) + (lineH * 0.9f);
             float panelCX = screenX;
             float panelTop = anchorY - panelH;
@@ -1247,8 +1257,8 @@ namespace DeRenderMod
         private void RenderSimpleHintHud()
         {
             string prompt = _isDeRenderActive
-                ? "PRESS ~y~F9~s~ TO STOP DE-RENDER"
-                : "PRESS ~y~F9~s~ TO ACTIVATE DE-RENDER";
+                ? "PRESS ~y~F10~s~ TO STOP DE-RENDER"
+                : "PRESS ~y~F10~s~ TO ACTIVATE DE-RENDER";
             ShowNativeHelpText(prompt);
         }
 
@@ -1321,25 +1331,66 @@ namespace DeRenderMod
 
                 string condition = DeriveHiddenCondition(ped, alertness);
                 Tuple<string, string> weapon = ExtractEquippedWeapon(ped);
-
-                // 2. Build 8-Dimensional Digital Signature Vector
-                // Maps the pedestrian's physical entity signature into full 8D quantum input space
-                // [Model, Faction, Voice, Accuracy, Cash, Alertness, Vitality, Entity Seed]
                 int pedSeedVal = ComputeStableEntitySeed(handle, modelHash);
-                float[] digitalVector = new float[8];
-                digitalVector[0] = Hash01(modelHash, pedSeedVal, 11);
-                digitalVector[1] = Hash01(faction.GetHashCode(), pedSeedVal, 23);
-                digitalVector[2] = Hash01(voiceTag.GetHashCode(), pedSeedVal, 37);
-                digitalVector[3] = ((accuracy * 17 + (pedSeedVal % 83)) % 100) / 100.0f;
-                digitalVector[4] = ((wallet * 37 + (pedSeedVal % 97)) % 800) / 800.0f;
-                digitalVector[5] = Hash01(alertness * 131 + pedSeedVal, handle, 53);
-                digitalVector[6] = Math.Max(0.10f, Math.Min(1.0f, ((ped.Health % 100) * 0.4f + (pedSeedVal % 100) * 0.6f) / 100.0f));
-                digitalVector[7] = Hash01(ped.Armor * 73 + pedSeedVal, modelHash, 79);
 
-                // 3. Match against Quantum Atlas Bank (Balanced 8D Nearest-Neighbor)
-                QPixlSpectrum qSpec = _quantumBank.FindNearestSpectrum(digitalVector, pedSeedVal);
-                Color qCol1, qCol2;
-                PedQuantumPalette pal = BuildQuantumPaletteFromDigitalSignature(qSpec, digitalVector, out qCol1, out qCol2);
+                // 2. Lock each pedestrian's Quantum Spectrum & Palette on first scan so their
+                //    Quantum Personality, Atlas Job ID, and collapsed color palette NEVER flicker!
+                QPixlSpectrum qSpec;
+                PedQuantumPalette pal;
+                if (!_pedSpectrumCache.TryGetValue(handle, out qSpec) || !_pedPaletteCache.TryGetValue(handle, out pal))
+                {
+                    // Extract Hidden Static High-Precision Engine Variables (Invisible to Player, High-Entropy, 100% Stable per Ped)
+                    // (a) 12-Slot Component & Texture Bitmask (Head, Hair, Torso, Legs, Bags, Shoes, Accs, Undershirt, Armor, Decals, Tops)
+                    int componentBitmask = ExtractHiddenComponentBitmask(handle);
+
+                    // (b) Raw 32-Bit Signed Engine Relationship Group Hash & Ped Type
+                    int rawRelGroupHash = Function.Call<int>(Hash.GET_PED_RELATIONSHIP_GROUP_HASH, handle);
+                    int rawPedType = Function.Call<int>(Hash.GET_PED_TYPE, handle);
+
+                    // (c) Initial Spawn Sub-Precision Orientation & Bone Height Snapshot (Captured once on first scan)
+                    float boneMicroDelta = ExtractSkeletonMicroOffset(ped);
+                    Quaternion qRot = ped.Quaternion;
+                    int quatEntropy = unchecked((int)(BitConverter.ToInt32(BitConverter.GetBytes(qRot.Z), 0) ^ BitConverter.ToInt32(BitConverter.GetBytes(qRot.W), 0)));
+                    int boneEntropy = BitConverter.ToInt32(BitConverter.GetBytes(boneMicroDelta), 0);
+
+                    // 3. Build 8-Dimensional Digital Signature Vector from Hidden Engine State
+                    float[] digitalVector = new float[8];
+                    digitalVector[0] = Hash01(modelHash, pedSeedVal, 11);
+                    digitalVector[1] = Hash01(componentBitmask, pedSeedVal, 23);
+                    digitalVector[2] = Hash01(boneEntropy, componentBitmask, 37);
+                    digitalVector[3] = ((accuracy * 17 + (pedSeedVal % 83)) % 100) / 100.0f;
+                    digitalVector[4] = ((wallet * 37 + (pedSeedVal % 97)) % 800) / 800.0f;
+                    digitalVector[5] = Hash01(rawRelGroupHash ^ (rawPedType * 16777619), handle, 53);
+                    digitalVector[6] = Math.Max(0.05f, Math.Min(1.0f, ((ped.Health % 100) * 0.40f + (pedSeedVal % 100) * 0.60f) / 100.0f));
+                    digitalVector[7] = Hash01(quatEntropy ^ (ped.Armor * 73), modelHash, 79);
+
+                    // 4. Match against Quantum Atlas Bank (Balanced 8D Nearest-Neighbor across 192 QPU Jobs)
+                    qSpec = _quantumBank.FindNearestSpectrum(digitalVector, pedSeedVal ^ componentBitmask);
+                    Color dummy1, dummy2;
+                    pal = BuildQuantumPaletteFromDigitalSignature(qSpec, digitalVector, out dummy1, out dummy2);
+
+                    _pedSpectrumCache[handle] = qSpec;
+                    _pedPaletteCache[handle] = pal;
+                }
+
+                Color qCol1 = pal.Center;
+                Color qCol2 = pal.InnerEdge;
+
+                string outfitCode;
+                if (!_pedOutfitCodeCache.TryGetValue(handle, out outfitCode))
+                {
+                    outfitCode = FormatOutfitCode(handle);
+                    _pedOutfitCodeCache[handle] = outfitCode;
+                }
+
+                string heightMetric;
+                if (!_pedHeightCache.TryGetValue(handle, out heightMetric))
+                {
+                    heightMetric = FormatPedHeightMetric(ped, pedSeedVal);
+                    _pedHeightCache[handle] = heightMetric;
+                }
+
+                string modelCode = $"0x{unchecked((uint)modelHash):X8} // ID #{handle}";
 
                 _trackedTargets.Add(new DeRenderedTarget
                 {
@@ -1362,7 +1413,10 @@ namespace DeRenderMod
                     QuantumSpectrum = qSpec,
                     Palette = pal,
                     QColor1 = qCol1,
-                    QColor2 = qCol2
+                    QColor2 = qCol2,
+                    ModelCode = modelCode,
+                    OutfitCode = outfitCode,
+                    HeightMetric = heightMetric
                 });
             }
         }
@@ -1385,7 +1439,7 @@ namespace DeRenderMod
             if (upper.Contains("BALLAS") || upper.Contains("FAMILIES") || upper.Contains("VAGOS") || upper.Contains("GANG")) return "GANG AFFILIATE";
             if (upper.Contains("SECURITY")) return "PRIVATE SECURITY";
             if (upper.Contains("BUSINESS") || upper.Contains("EXECUTIVE")) return "CIVILIAN // CORPORATE";
-            return upper.Contains("_F_") || upper.Contains("FEMALE") ? "CIVILIAN // FEMALE" : "CIVILIAN // MALE";
+            return "CIVILIAN";
         }
 
         private static string DerivePedFaction(Ped ped, string modelName)
@@ -1491,40 +1545,118 @@ namespace DeRenderMod
             return Tuple.Create("NONE", "Clear");
         }
 
+        private static int ExtractHiddenComponentBitmask(int pedHandle)
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                for (int comp = 0; comp < 12; comp++)
+                {
+                    int drawable = Function.Call<int>(Hash.GET_PED_DRAWABLE_VARIATION, pedHandle, comp);
+                    int texture = Function.Call<int>(Hash.GET_PED_TEXTURE_VARIATION, pedHandle, comp);
+                    int palette = Function.Call<int>(Hash.GET_PED_PALETTE_VARIATION, pedHandle, comp);
+                    hash = (hash ^ (uint)((drawable << 16) | (texture << 8) | palette)) * 16777619u;
+                }
+                return (int)(hash & 0x7FFFFFFF);
+            }
+        }
+
+        private static string FormatOutfitCode(int pedHandle)
+        {
+            int dHead = Math.Max(0, Function.Call<int>(Hash.GET_PED_DRAWABLE_VARIATION, pedHandle, 0));
+            int dHair = Math.Max(0, Function.Call<int>(Hash.GET_PED_DRAWABLE_VARIATION, pedHandle, 2));
+            int dTop  = Math.Max(0, Function.Call<int>(Hash.GET_PED_DRAWABLE_VARIATION, pedHandle, 3));
+            int dLegs = Math.Max(0, Function.Call<int>(Hash.GET_PED_DRAWABLE_VARIATION, pedHandle, 4));
+            int tTop  = Math.Max(0, Function.Call<int>(Hash.GET_PED_TEXTURE_VARIATION, pedHandle, 3));
+            int tLegs = Math.Max(0, Function.Call<int>(Hash.GET_PED_TEXTURE_VARIATION, pedHandle, 4));
+            int hash16 = ExtractHiddenComponentBitmask(pedHandle) & 0xFFFF;
+            return $"D:{dHead:D2}.{dHair:D2}.{dTop:D2}.{dLegs:D2} T:{tTop:D2}.{tLegs:D2} [{hash16:X4}]";
+        }
+
+        private static string FormatPedHeightMetric(Ped ped, int pedSeed)
+        {
+            float boneDelta = 0.78f;
+            try
+            {
+                Vector3 head = ped.Bones[Bone.IKHead].Position;
+                Vector3 root = ped.Position;
+                float dz = Math.Abs(head.Z - root.Z);
+                if (dz > 0.35f && dz < 1.35f) boneDelta = dz;
+            }
+            catch { }
+
+            float microVar = ((pedSeed % 29) - 14) * 0.0045f;
+            float heightMeters = Math.Max(1.52f, Math.Min(2.04f, 0.94f + boneDelta + microVar));
+            return $"{heightMeters:F2} m (Δ+{boneDelta:F3})";
+        }
+
+        private static float ExtractSkeletonMicroOffset(Ped ped)
+        {
+            try
+            {
+                Vector3 head = ped.Bones[Bone.IKHead].Position;
+                Vector3 root = ped.Position;
+                return (head.Z - root.Z) * 1000.0f + (head.X - root.X) * 100.0f;
+            }
+            catch
+            {
+                return ped.Heading;
+            }
+        }
+
         private static PedQuantumPalette BuildQuantumPaletteFromDigitalSignature(
             QPixlSpectrum spec,
             float[] digitalVector,
             out Color qCol1,
             out Color qCol2)
         {
-            // 3 Exclusive Biometric Factors for Center Color:
-            // 1. Accuracy: digitalVector[3] (0.0 - 1.0)
-            // 2. Wallet Cash: digitalVector[4] (0.0 - 1.0)
-            // 3. Health Vitality: digitalVector[6] (0.0 - 1.0)
+            // Extract all 8 hidden NPC signature dimensions [0.0 - 1.0]
+            float v0 = digitalVector != null && digitalVector.Length > 0 ? digitalVector[0] : 0.5f;
+            float v1 = digitalVector != null && digitalVector.Length > 1 ? digitalVector[1] : 0.3f;
+            float v2 = digitalVector != null && digitalVector.Length > 2 ? digitalVector[2] : 0.7f;
             float accuracyNorm = digitalVector != null && digitalVector.Length > 3 ? digitalVector[3] : 0.5f;
-            float walletNorm = digitalVector != null && digitalVector.Length > 4 ? digitalVector[4] : 0.2f;
-            float healthNorm = digitalVector != null && digitalVector.Length > 6 ? digitalVector[6] : 1.0f;
+            float walletNorm   = digitalVector != null && digitalVector.Length > 4 ? digitalVector[4] : 0.2f;
+            float v5           = digitalVector != null && digitalVector.Length > 5 ? digitalVector[5] : 0.4f;
+            float healthNorm   = digitalVector != null && digitalVector.Length > 6 ? digitalVector[6] : 1.0f;
+            float v7           = digitalVector != null && digitalVector.Length > 7 ? digitalVector[7] : 0.6f;
 
-            // v2.3: the measured qpixl-v1 OUTPUT spectrum (real Atlas result) now shifts the palette.
-            float qShift = 0f, qSat = 0f, qBri = 0f;
+            // Extract all 8 measured Atlas qpixl-v1 QPU output probabilities [0.0 - 1.0]
+            float q0 = 0.5f, q1 = 0.5f, q2 = 0.5f, q3 = 0.5f, q4 = 0.5f, q5 = 0.5f, q6 = 0.5f, q7 = 0.5f;
             if (spec != null && spec.Normalized != null && spec.Normalized.Length >= 8)
             {
-                qShift = (spec.Normalized[0] + spec.Normalized[2] + spec.Normalized[5] - 1.5f) * 0.16f;
-                qSat = (spec.Normalized[3] - 0.5f) * 0.14f;
-                qBri = (spec.Normalized[7] - 0.5f) * 0.10f;
+                q0 = spec.Normalized[0];
+                q1 = spec.Normalized[1];
+                q2 = spec.Normalized[2];
+                q3 = spec.Normalized[3];
+                q4 = spec.Normalized[4];
+                q5 = spec.Normalized[5];
+                q6 = spec.Normalized[6];
+                q7 = spec.Normalized[7];
             }
 
-            // Compute center core hue from the 3 pure factors + quantum spectrum shift
-            float coreHue = (walletNorm * 0.38f + accuracyNorm * 0.42f + healthNorm * 0.20f + qShift + 1.0f) % 1.0f;
-            Color centerColor = HsvToColor(coreHue, Math.Max(0.6f, Math.Min(1f, 0.90f + qSat)), Math.Max(0.8f, Math.Min(1f, 1.00f + qBri)));
+            // =========================================================================
+            // 8-CHANNEL QUANTUM + HIDDEN BIOMETRIC COLOR SYNTHESIS
+            // =========================================================================
+            // 1. Center Core Ring: Driven by QPU channels (q0, q1, q2) + Biometrics & Hidden Component/Bone Hashes
+            float coreHue = (q0 * 0.45f + q2 * 0.30f + walletNorm * 0.25f + accuracyNorm * 0.30f + v1 * 0.35f + v2 * 0.20f) % 1.0f;
+            float coreSat = 0.78f + (q1 * 0.22f);  // [0.78 - 1.00]
+            float coreVal = 0.90f + (q7 * 0.10f);  // [0.90 - 1.00]
+            Color centerColor = HsvToColor(coreHue, coreSat, coreVal);
 
-            // Ring 2 (Inner Edge): High-contrast complementary electric cyan/aqua or hyper-violet
-            float innerHue = (coreHue + 0.38f) % 1.0f;
-            Color innerEdgeColor = HsvToColor(innerHue, 0.85f, 0.98f);
+            // 2. Mid Concentric Ring (InnerEdge): Hue offset & saturation driven by QPU channels (q3, q4, q5) + Hidden RelGroup/Quat
+            // Ranges from +0.18 (analogous neon gradient) to +0.58 (split-complementary contrast) instead of a fixed +0.38!
+            float innerOffset = 0.18f + ((q3 * 0.55f + q4 * 0.45f + v5 * 0.30f) % 1.0f) * 0.42f;
+            float innerHue = (coreHue + innerOffset) % 1.0f;
+            float innerSat = 0.80f + (q5 * 0.20f); // [0.80 - 1.00]
+            float innerVal = 0.92f + (q4 * 0.08f); // [0.92 - 1.00]
+            Color innerEdgeColor = HsvToColor(innerHue, innerSat, innerVal);
 
-            // Ring 3 (Outer Perimeter Edge): Deep neon midnight obsidian / electric cobalt
-            float outerHue = (coreHue + 0.68f) % 1.0f;
-            Color outerEdgeColor = HsvToColor(outerHue, 0.95f, 0.60f);
+            // 3. Outer Perimeter Ring (OuterEdge): Hue offset & deep glow driven by QPU channels (q6, q7, q0) + Quaternion entropy
+            float outerOffset = 0.48f + ((q6 * 0.60f + q7 * 0.40f + v7 * 0.35f + v0 * 0.25f) % 1.0f) * 0.38f;
+            float outerHue = (coreHue + outerOffset) % 1.0f;
+            float outerSat = 0.88f + (q6 * 0.12f); // [0.88 - 1.00]
+            float outerVal = 0.52f + (q7 * 0.26f); // [0.52 - 0.78]
+            Color outerEdgeColor = HsvToColor(outerHue, outerSat, outerVal);
 
             qCol1 = centerColor;
             qCol2 = innerEdgeColor;
@@ -1635,6 +1767,10 @@ namespace DeRenderMod
 
         private readonly Dictionary<int, string> _assignedTasks = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _lastCuriousRefresh = new Dictionary<int, int>();
+        private readonly Dictionary<int, QPixlSpectrum> _pedSpectrumCache = new Dictionary<int, QPixlSpectrum>();
+        private readonly Dictionary<int, PedQuantumPalette> _pedPaletteCache = new Dictionary<int, PedQuantumPalette>();
+        private readonly Dictionary<int, string> _pedOutfitCodeCache = new Dictionary<int, string>();
+        private readonly Dictionary<int, string> _pedHeightCache = new Dictionary<int, string>();
 
         private void ApplyCollapseBehavior(DeRenderedTarget target, Ped player)
         {
@@ -1643,13 +1779,23 @@ namespace DeRenderMod
 
             string personality = DerivePersonality(target.QuantumSpectrum);
 
-            // If already collapsed within 9m, keep CURIOUS peds attentively facing/looking at the observer
+            // If already collapsed within 9m, keep BRAVE and CURIOUS peds actively engaged with the observer
             if (_collapsedHandles.Contains(target.Handle))
             {
-                if (personality == "CURIOUS")
+                int now = Game.GameTime;
+                int lastRef;
+                if (personality == "BRAVE")
                 {
-                    int now = Game.GameTime;
-                    int lastRef;
+                    if (!_lastCuriousRefresh.TryGetValue(target.Handle, out lastRef) || now - lastRef > 2000)
+                    {
+                        _lastCuriousRefresh[target.Handle] = now;
+                        _assignedTasks[target.Handle] = "TASK_GO_TO_ENTITY";
+                        Function.Call(Hash.TASK_GO_TO_ENTITY, ped.Handle, player.Handle, -1, 1.8f, 1.5f, 0, 0);
+                        Function.Call(Hash.TASK_LOOK_AT_ENTITY, ped.Handle, player.Handle, 3000, 2048, 3);
+                    }
+                }
+                else if (personality == "CURIOUS")
+                {
                     if (!_lastCuriousRefresh.TryGetValue(target.Handle, out lastRef) || now - lastRef > 2200)
                     {
                         _lastCuriousRefresh[target.Handle] = now;
@@ -1817,6 +1963,10 @@ namespace DeRenderMod
             _eventCount.Clear();
             _assignedTasks.Clear();
             _lastCuriousRefresh.Clear();
+            _pedSpectrumCache.Clear();
+            _pedPaletteCache.Clear();
+            _pedOutfitCodeCache.Clear();
+            _pedHeightCache.Clear();
         }
 
         private void EquipPlayerGlasses(Ped player)
