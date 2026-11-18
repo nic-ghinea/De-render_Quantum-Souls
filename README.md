@@ -129,4 +129,3 @@ Approaching within `9m` of an NPC with clear line-of-sight (`HAS_ENTITY_CLEAR_LO
 
 * [`DeRendered.cs`](DeRendered.cs) — Complete C# source code for the mod (single-file architecture, zero external dependencies beyond ScriptHookVDotNet v3).
 * [`de_render_mod/`](de_render_mod/) — Ready-to-install release package containing `DeRendered.dll`, `DeRendered.baked.txt` (224 verified Atlas jobs), `DeRendered.ini`, and `README.txt`.
-* [`DeRender_Quantum_Architecture_Report.pdf`](DeRender_Quantum_Architecture_Report.pdf) — Technical architecture & Moth Atlas quantum engine integration specification.
